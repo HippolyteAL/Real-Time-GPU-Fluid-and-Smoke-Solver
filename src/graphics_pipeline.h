@@ -18,21 +18,21 @@ struct CameraPushConstants {
 
 // Everything is prettier with a skybox
 struct Cubemap {
-    VkImage         cubemapImage;
-    VkDeviceMemory  cubemapMemory;
-    VkImageView     cubemapImageView;
-    VkSampler       cubemapSampler;
-    uint32_t        skyboxEnabled = 0u;
+    VkImage         cubemapImage     = VK_NULL_HANDLE;
+    VkDeviceMemory  cubemapMemory    = VK_NULL_HANDLE;
+    VkImageView     cubemapImageView = VK_NULL_HANDLE;
+    VkSampler       cubemapSampler   = VK_NULL_HANDLE;
+    uint32_t        skyboxEnabled    = 0u;
 };
 
 class GraphicsPipeline {
 public:
     void init(VkDevice device, VkFormat swapChainImageFormat, VkExtent2D extent);
     void cleanup(VkDevice device);
-    void record_skybox(VkCommandBuffer cmd, const Cubemap& cubemap, VkFramebuffer framebuffer, VkExtent2D extent);
-    void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera);
+    void record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuffer, VkExtent2D extent);
+    void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera, uint32_t currentFieldIndex);       
     // Cubemap: right, left, top, bottom, front, back
-    void init_cubemap(VkDevice device, Cubemap& cubemap); // TODO: refactor with a real cubemap, adding std::array<std::string, 6> faces to the args.
+    void init_cubemap(VkDevice device);
 
 private:
     VkRenderPass                    renderPass;

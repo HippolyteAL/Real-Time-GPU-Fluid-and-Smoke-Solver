@@ -29,15 +29,15 @@ public:
     void cleanup(VkDevice device);
     // Orchestrates one full timestep in dependency order, inserting barriers between passes. This is what render_loop() should call normally.
     void record(VkCommandBuffer cmd, const FluidGridResources& grid, float dt);  
-
     // Individual passes for easier profiling
     void record_buoyancy(VkCommandBuffer cmd, const FluidGridResources& grid, float dt);
     void record_advect_velocity(VkCommandBuffer cmd, const FluidGridResources& grid, float dt);
     void record_divergence(VkCommandBuffer cmd, const FluidGridResources& grid);
     void record_jacobi_iteration(VkCommandBuffer cmd, const FluidGridResources& grid);
     void record_projection(VkCommandBuffer cmd, const FluidGridResources& grid);
-    void record_advect_scalars(VkCommandBuffer cmd, const FluidGridResources& grid, float dt); // density + temperature, post-projection
+    void record_advect_scalars(VkCommandBuffer cmd, const FluidGridResources& grid, float dt);  // density + temperature, post-projection
     void record_boundary(VkCommandBuffer cmd, const FluidGridResources& grid);
+    uint32_t current_field_index() const { return fieldPingPong; }                              // lets GraphicsPipeline know which buffer to sample
 
     uint32_t jacobiIterations = 40;   // runtime tunable
 
@@ -49,9 +49,11 @@ private:
     VkPipeline projectionPipeline;      // subtract pressure gradient
     VkPipeline advectScalarsPipeline;
     VkPipeline boundaryPipeline;
+    uint32_t fieldPingPong = 0;         // velocity/density/temperature parity, flips once per record()
+    uint32_t pressurePingPong = 0;      // pressure parity, flips once per Jacobi iteration, reset each frame
 
     VkPipelineLayout              layout;               // can be shared as long as push constant layout matches
-    VkDescriptorSetLayout         descriptorSetLayout;  // Might need 2 of those for the Jacobi passes
+    VkDescriptorSetLayout         descriptorSetLayout; 
     VkDescriptorPool              descriptorPool;
     std::vector<VkDescriptorSet>  descriptorSets;
 

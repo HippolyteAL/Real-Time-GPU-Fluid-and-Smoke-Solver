@@ -96,7 +96,6 @@ private:
 
     std::unique_ptr<FluidGridResources> fluidGrid;
     std::unique_ptr<ComputePipeline>    computePipeline;
-    std::unique_ptr<Cubemap>            cubemap;
     std::unique_ptr<GraphicsPipeline>   graphicsPipeline;
     std::unique_ptr<FrameResources>     frameResources;
 

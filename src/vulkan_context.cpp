@@ -418,11 +418,10 @@ void VulkanContext::init_vulkan() {
     graphicsPipeline = std::make_unique<GraphicsPipeline>();
     frameResources   = std::make_unique<FrameResources>();
     fluidGrid        = std::make_unique<FluidGridResources>();
-    cubemap          = std::make_unique<Cubemap>();
 
     computePipeline->init(renderWindow.device, computeFamily);
     graphicsPipeline->init(renderWindow.device, swapChain.imageFormat, swapChain.extent);
-    graphicsPipeline->init_cubemap(renderWindow.device, *cubemap);
+    graphicsPipeline->init_cubemap(renderWindow.device);
     frameResources->init(renderWindow.device, indices.graphicsFamily.value(), computeFamily);
 
     std::cout << "[init] compute pipeline, graphics pipeline, and frame resources constructed\n";

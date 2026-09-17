@@ -11,7 +11,7 @@ class FrameResources {
 public:
     void init(VkDevice device, uint32_t graphicsFamily, uint32_t computeFamily);
     void cleanup(VkDevice device);
-    void begin_frame(VkDevice device, VkSwapchainKHR swapChain);
+    uint32_t begin_frame(VkDevice device, VkSwapchainKHR swapChain);
     VkCommandBuffer acquire_compute_cmd_buffer();
     VkCommandBuffer acquire_graphics_cmd_buffer();
     void submit_compute(VkQueue computeQueue, VkCommandBuffer cmd);
