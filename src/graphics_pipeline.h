@@ -29,7 +29,7 @@ class GraphicsPipeline {
 public:
     void init(VkDevice device, VkFormat swapChainImageFormat, VkExtent2D extent);
     void cleanup(VkDevice device);
-    void record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuffer, VkExtent2D extent);
+    void record_skybox(VkCommandBuffer cmd, const Cubemap& cubemap, VkFramebuffer framebuffer, VkExtent2D extent);
     void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera);
 
 private:
