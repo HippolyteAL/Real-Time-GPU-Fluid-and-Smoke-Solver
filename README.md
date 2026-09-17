@@ -6,6 +6,6 @@
 
 windows (powershell, called in root)
 
-cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=Drive:/path/to/vcpkg.cmake
-cmake --build build --config Debug
-.\build\MyVulkanProject.exe
+cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=C:/dev/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+.\build\VulkanFluidSolver.exe
