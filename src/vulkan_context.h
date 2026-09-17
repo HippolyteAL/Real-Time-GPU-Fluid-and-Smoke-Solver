@@ -41,22 +41,22 @@ struct SwapChainSupportDetails {
 
 // Render window
 struct RenderWindow {
-    GLFWwindow*                 window;
-    VkInstance                  instance;
-    VkDebugUtilsMessengerEXT    debugMessenger;
-    VkSurfaceKHR                surface;
+    GLFWwindow*                 window = nullptr;
+    VkInstance                  instance = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT    debugMessenger = VK_NULL_HANDLE;
+    VkSurfaceKHR                surface = VK_NULL_HANDLE;
     VkPhysicalDevice            physicalDevice = VK_NULL_HANDLE;
-    VkDevice                    device;
-    VkQueue                     graphicsQueue;
-    VkQueue                     presentQueue;
+    VkDevice                    device = VK_NULL_HANDLE;
+    VkQueue                     graphicsQueue = VK_NULL_HANDLE;
+    VkQueue                     presentQueue = VK_NULL_HANDLE;
 };
 
 // Swapchain
 struct SwapChain {
-    VkSwapchainKHR              swapChain;
+    VkSwapchainKHR              swapChain = VK_NULL_HANDLE;
     std::vector<VkImage>        images;
-    VkFormat                    imageFormat;
-    VkExtent2D                  extent;
+    VkFormat                    imageFormat{};
+    VkExtent2D                  extent{};
     std::vector<VkImageView>    imageViews;
     std::vector<VkFramebuffer>  framebuffers;
 };
@@ -93,6 +93,12 @@ private:
     RenderWindow    renderWindow;
     SwapChain       swapChain;
     Camera          camera;
+
+    std::unique_ptr<FluidGridResources> fluidGrid;
+    std::unique_ptr<ComputePipeline>    computePipeline;
+    std::unique_ptr<Cubemap>            cubemap;
+    std::unique_ptr<GraphicsPipeline>   graphicsPipeline;
+    std::unique_ptr<FrameResources>     frameResources;
 
     // Core initialization
     void init_window(uint32_t width = Constants::WIDTH, uint32_t height = Constants::HEIGHT);

@@ -31,6 +31,8 @@ public:
     void cleanup(VkDevice device);
     void record_skybox(VkCommandBuffer cmd, const Cubemap& cubemap, VkFramebuffer framebuffer, VkExtent2D extent);
     void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera);
+    // Cubemap: right, left, top, bottom, front, back
+    void init_cubemap(VkDevice device, Cubemap& cubemap); // TODO: refactor with a real cubemap, adding std::array<std::string, 6> faces to the args.
 
 private:
     VkRenderPass                    renderPass;
@@ -42,10 +44,7 @@ private:
     VkDescriptorPool                descriptorPool;
     std::vector<VkDescriptorSet>    descriptorSets;
     VkSampler                       volumeSampler;
-
     Cubemap cubemap;
-    // Cubemap: right, left, top, bottom, front, back
-    void init_cubemap(std::array<std::string, 6> faces);
 };
 
 #endif // GRAPHICS_PIPELINE_H

@@ -1,21 +1,17 @@
-#include <GLFW/glfw3.h>
-#include <glm/glm.hpp>
+#include "vulkan_context.h"
 
 #include <iostream>
+#include <exception>
 
 int main() {
-    if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW\n";
-        return -1;
+    try {
+        VulkanContext context;   // constructor runs init_window() & init_vulkan()
+        context.render_loop();
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[fatal] " << e.what() << std::endl;
+        return EXIT_FAILURE;
     }
 
-    uint32_t extensionCount = 0;
-    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
-    std::cout << extensionCount << " Vulkan extensions supported\n";
-
-    glm::mat4 testMatrix(1.0f);
-    (void)testMatrix;
-
-    glfwTerminate();
-    return 0;
+    return EXIT_SUCCESS;
 }
