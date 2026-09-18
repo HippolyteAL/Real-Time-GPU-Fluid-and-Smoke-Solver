@@ -2,6 +2,7 @@
 
 #include <array>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -83,10 +84,13 @@ void dispatch_pass(VkCommandBuffer cmd, VkPipeline pipeline, VkPipelineLayout la
 
 } // namespace
 
-void ComputePipeline::init(VkDevice device, uint32_t computeQueueFamily) {
+void ComputePipeline::init(VkDevice device, uint32_t computeQueueFamily, uint32_t framesInFlight, float timestampPeriod) {
     /* computeQueueFamily currently unused here since command pool ownership lives in FrameResources, not ComputePipeline. 
     Kept as a parameter in case a future validation step (e.g. confirming pipeline compatibility with the family) needs it.*/
     (void)computeQueueFamily;
+    
+    // Profiling start
+    timestampPeriodNs = timestampPeriod;
 
     // Descriptor set layout 
     // 8 storage image bindings: {velocity, density, pressure, temperature} x {slot0, slot1} + divergence. Every pass shares this one layout; each shader only reads the bindings it needs.
@@ -150,9 +154,28 @@ void ComputePipeline::init(VkDevice device, uint32_t computeQueueFamily) {
     projectionPipeline      = create_compute_pipeline(device, "shaders/projection.comp.spv", layout);
     advectScalarsPipeline   = create_compute_pipeline(device, "shaders/advect_scalars.comp.spv", layout);
     boundaryPipeline        = create_compute_pipeline(device, "shaders/boundary.comp.spv", layout);
+
+    // Timestamp query pools, one per frame-in-flight
+    timestampPools.resize(framesInFlight);
+    VkQueryPoolCreateInfo queryPoolInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+    queryPoolInfo.queryType  = VK_QUERY_TYPE_TIMESTAMP;
+    queryPoolInfo.queryCount = kTimingRegionCount * 2;   // start & end per region
+
+    for (uint32_t i = 0; i < framesInFlight; ++i) {
+        if (vkCreateQueryPool(device, &queryPoolInfo, nullptr, &timestampPools[i]) != VK_SUCCESS)
+            throw std::runtime_error("failed to create timestamp query pool");
+    }
+
+    std::cout   << "[init] compute timing: "                    << kTimingRegionCount 
+                << " regions x "                                << framesInFlight 
+                << " frame(s) in flight, timestamp period = "   << timestampPeriodNs
+                << " ns/tick\n";
 }
 
 void ComputePipeline::cleanup(VkDevice device) {
+    for (VkQueryPool pool : timestampPools) {
+        vkDestroyQueryPool(device, pool, nullptr);
+    }
     vkDestroyPipeline(device, buoyancyPipeline, nullptr);
     vkDestroyPipeline(device, advectVelocityPipeline, nullptr);
     vkDestroyPipeline(device, divergencePipeline, nullptr);
@@ -166,35 +189,92 @@ void ComputePipeline::cleanup(VkDevice device) {
     vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 }
 
-void ComputePipeline::record(VkCommandBuffer cmd, const FluidGridResources& grid, float dt) {
+void ComputePipeline::record(VkCommandBuffer cmd, const FluidGridResources& grid, float dt, uint32_t frameIndex) {
+    VkQueryPool pool = timestampPools[frameIndex];
+    vkCmdResetQueryPool(cmd, pool, 0, kTimingRegionCount * 2);
+
+    auto begin_region = [&](TimingRegion region) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, region * 2);
+    };
+    auto end_region = [&](TimingRegion region) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, region * 2 + 1);
+    };
+
+    begin_region(kTimingBuoyancy);
     record_buoyancy(cmd, grid, dt);
+    end_region(kTimingBuoyancy);
     barrier(cmd);
 
+    begin_region(kTimingAdvectVelocity);
     record_advect_velocity(cmd, grid, dt);
+    end_region(kTimingAdvectVelocity);
     barrier(cmd);
 
+    begin_region(kTimingBoundaryPre);
     record_boundary(cmd, grid);             // enforce before divergence reads velocity
+    end_region(kTimingBoundaryPre);
     barrier(cmd);
 
+    begin_region(kTimingDivergence);
     record_divergence(cmd, grid);
+    end_region(kTimingDivergence);
     barrier(cmd);
 
     pressurePingPong = 0;
+    begin_region(kTimingJacobi);
     for (uint32_t i = 0; i < jacobiIterations; ++i) {
         record_jacobi_iteration(cmd, grid);
         barrier(cmd);
         pressurePingPong ^= 1;
     }
+    end_region(kTimingJacobi);
 
+    begin_region(kTimingProjection);
     record_projection(cmd, grid);
+    end_region(kTimingProjection);
     barrier(cmd);
 
+    begin_region(kTimingBoundaryPost);
     record_boundary(cmd, grid);             // re-enforce after projection modifies velocity
+    end_region(kTimingBoundaryPost);
     barrier(cmd);
 
+    begin_region(kTimingAdvectScalars);
     record_advect_scalars(cmd, grid, dt);   // density/temperature, using the now-divergence-free velocity
+    end_region(kTimingAdvectScalars);
 
     fieldPingPong ^= 1;                     // velocity/density/temperature swap once per full timestep (NOTE: ^= 1 should work, might not work)
+}
+
+void ComputePipeline::read_timestamp_results(VkDevice device, uint32_t frameIndex) {
+    std::array<uint64_t, kTimingRegionCount * 2> raw{};
+    VkResult result = vkGetQueryPoolResults(
+        device, timestampPools[frameIndex], 0, kTimingRegionCount * 2,
+        sizeof(raw), raw.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+
+    if (result != VK_SUCCESS) {
+        return;   // Pool hasn't been written to yet
+    }
+
+    for (uint32_t i = 0; i < kTimingRegionCount; ++i) {
+        uint64_t start = raw[i * 2];
+        uint64_t end   = raw[i * 2 + 1];
+        lastTimings[i] = static_cast<float>(end - start) * timestampPeriodNs / 1e6f;   // ns -> ms
+    }
+}
+
+void ComputePipeline::log_timings() const {
+    static const char* kRegionNames[kTimingRegionCount] = {
+        "buoyancy", "advect_velocity", "boundary(pre)", "divergence",
+        "jacobi", "projection", "boundary(post)", "advect_scalars"
+    };
+    float total = 0.0f;
+    std::cout << "[timing] compute breakdown (ms):\n";
+    for (uint32_t i = 0; i < kTimingRegionCount; ++i) {
+        std::cout << "  " << kRegionNames[i] << ": " << lastTimings[i] << "\n";
+        total += lastTimings[i];
+    }
+    std::cout << "  total: " << total << "\n";
 }
 
 void ComputePipeline::record_buoyancy(VkCommandBuffer cmd, const FluidGridResources& grid, float dt) {

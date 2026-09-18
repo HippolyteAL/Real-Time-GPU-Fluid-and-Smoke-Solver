@@ -24,6 +24,7 @@ private:
     std::vector<VkSemaphore>      computeFinishedSemaphores, renderFinishedSemaphores;
     std::vector<VkFence>          inFlightFences;
     uint32_t                      currentFrame = 0;
+    uint32_t current_frame_index() const { return currentFrame; }
 };
 
 #endif // FRAME_RESOURCES_H

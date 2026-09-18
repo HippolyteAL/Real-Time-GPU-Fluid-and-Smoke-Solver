@@ -413,13 +413,30 @@ void VulkanContext::init_vulkan() {
     std::cout << "[init] swapchain created (" << swapChain.images.size() << " images, "
               << swapChain.extent.width << "x" << swapChain.extent.height << ")\n";
 
+    VkPhysicalDeviceProperties selectedProps;
+    vkGetPhysicalDeviceProperties(renderWindow.physicalDevice, &selectedProps);
+    float timestampPeriodNs = selectedProps.limits.timestampPeriod;
+
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(renderWindow.physicalDevice, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(renderWindow.physicalDevice, &familyCount, families.data());
+
+    bool timestampsSupported = families[computeFamily].timestampValidBits > 0;
+    std::cout << "[init] timestamp queries " << (timestampsSupported ? "supported" : "NOT supported")
+              << " on compute family " << computeFamily
+              << " (period = " << timestampPeriodNs << " ns/tick)\n";
+    if (!timestampsSupported) {
+        throw std::runtime_error("compute queue family does not support timestamp queries");
+    }
+
     // Subsystems
     computePipeline  = std::make_unique<ComputePipeline>();
     graphicsPipeline = std::make_unique<GraphicsPipeline>();
     frameResources   = std::make_unique<FrameResources>();
     fluidGrid        = std::make_unique<FluidGridResources>();
 
-    computePipeline->init(renderWindow.device, computeFamily);
+    computePipeline->init(renderWindow.device, computeFamily, Constants::MAX_FRAMES_IN_FLIGHT, timestampPeriodNs);
     graphicsPipeline->init(renderWindow.device, swapChain.imageFormat, swapChain.extent);
     graphicsPipeline->init_cubemap(renderWindow.device);
     frameResources->init(renderWindow.device, indices.graphicsFamily.value(), computeFamily);
