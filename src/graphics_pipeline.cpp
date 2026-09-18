@@ -8,6 +8,18 @@
 
 namespace {
 
+std::string get_executable_dir() {
+    #ifdef _WIN32
+        char path[MAX_PATH];
+        GetModuleFileNameA(nullptr, path, MAX_PATH);
+        std::string full(path);
+        size_t pos = full.find_last_of("\\/");
+        return (pos == std::string::npos) ? "" : full.substr(0, pos + 1);
+    #else
+        #error "get_executable_dir: only Win32 implemented"
+    #endif
+}    
+
 std::vector<char> read_file(const std::string& path) {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("failed to open shader file: " + path);
@@ -18,14 +30,14 @@ std::vector<char> read_file(const std::string& path) {
     return buffer;
 }
 
-VkShaderModule create_shader_module(VkDevice device, const std::string& path) {
-    std::vector<char> code = read_file(path);
+VkShaderModule create_shader_module(VkDevice device, const std::string& relativePath) {
+    std::vector<char> code = read_file(get_executable_dir() + relativePath);
     VkShaderModuleCreateInfo createInfo{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
     createInfo.codeSize = code.size();
     createInfo.pCode    = reinterpret_cast<const uint32_t*>(code.data());
     VkShaderModule module;
     if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS)
-        throw std::runtime_error("failed to create shader module: " + path);
+        throw std::runtime_error("failed to create shader module: " + relativePath);
     return module;
 }
 
@@ -34,36 +46,36 @@ VkShaderModule create_shader_module(VkDevice device, const std::string& path) {
 void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkExtent2D extent) {
     // Render pass: single color attachment, no depth (draw order handles skybox, then volume) 
     VkAttachmentDescription colorAttachment{};
-    colorAttachment.format          = swapChainImageFormat;
-    colorAttachment.samples         = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp          = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp         = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp   = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp  = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    colorAttachment.format         = swapChainImageFormat;
+    colorAttachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
 
     VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount    = 1;
-    subpass.pColorAttachments       = &colorRef;
+    subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments    = &colorRef;
 
     VkSubpassDependency dependency{};
-    dependency.srcSubpass       = VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass       = 0;
-    dependency.srcStageMask     = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstStageMask     = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask    = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass    = 0;
+    dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo renderPassInfo{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
-    renderPassInfo.attachmentCount  = 1;
-    renderPassInfo.pAttachments     = &colorAttachment;
-    renderPassInfo.subpassCount     = 1;
-    renderPassInfo.pSubpasses       = &subpass;
-    renderPassInfo.dependencyCount  = 1;
-    renderPassInfo.pDependencies    = &dependency;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments    = &colorAttachment;
+    renderPassInfo.subpassCount    = 1;
+    renderPassInfo.pSubpasses      = &subpass;
+    renderPassInfo.dependencyCount = 1;
+    renderPassInfo.pDependencies   = &dependency;
     if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
         throw std::runtime_error("failed to create render pass");
 
@@ -82,28 +94,28 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
 
     // Trilinear sampler for the volume; clamps to border so rays exiting the box read as empty
     VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    samplerInfo.magFilter       = VK_FILTER_LINEAR;
-    samplerInfo.minFilter       = VK_FILTER_LINEAR;
-    samplerInfo.addressModeU    = samplerInfo.addressModeV = samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    samplerInfo.borderColor     = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-    samplerInfo.mipmapMode      = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.magFilter    = VK_FILTER_LINEAR;
+    samplerInfo.minFilter    = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = samplerInfo.addressModeV = samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerInfo.borderColor  = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    samplerInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     if (vkCreateSampler(device, &samplerInfo, nullptr, &volumeSampler) != VK_SUCCESS)
         throw std::runtime_error("failed to create volume sampler");
 
     // Descriptor pool & sets: 2 sets, one per ComputePipeline field parity 
     VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 2 };
     VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    poolInfo.poolSizeCount  = 1;
-    poolInfo.pPoolSizes     = &poolSize;
-    poolInfo.maxSets        = 2;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes    = &poolSize;
+    poolInfo.maxSets       = 2;
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
         throw std::runtime_error("failed to create graphics descriptor pool");
 
     std::vector<VkDescriptorSetLayout> setLayouts(2, descriptorSetLayout);
     VkDescriptorSetAllocateInfo dsAlloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-    dsAlloc.descriptorPool      = descriptorPool;
-    dsAlloc.descriptorSetCount  = 2;
-    dsAlloc.pSetLayouts         = setLayouts.data();
+    dsAlloc.descriptorPool     = descriptorPool;
+    dsAlloc.descriptorSetCount = 2;
+    dsAlloc.pSetLayouts        = setLayouts.data();
     descriptorSets.resize(2);
     if (vkAllocateDescriptorSets(device, &dsAlloc, descriptorSets.data()) != VK_SUCCESS)
         throw std::runtime_error("failed to allocate graphics descriptor sets");
@@ -113,10 +125,10 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
     VkPushConstantRange pushRange{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(CameraPushConstants) };
 
     VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plInfo.setLayoutCount           = 1;
-    plInfo.pSetLayouts              = &descriptorSetLayout;
-    plInfo.pushConstantRangeCount   = 1;
-    plInfo.pPushConstantRanges      = &pushRange;
+    plInfo.setLayoutCount         = 1;
+    plInfo.pSetLayouts            = &descriptorSetLayout;
+    plInfo.pushConstantRangeCount = 1;
+    plInfo.pPushConstantRanges    = &pushRange;
     if (vkCreatePipelineLayout(device, &plInfo, nullptr, &skyboxLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create skybox pipeline layout");
     if (vkCreatePipelineLayout(device, &plInfo, nullptr, &volumeLayout) != VK_SUCCESS)
@@ -136,9 +148,9 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
     viewportState.pScissors     = &scissor;
 
     VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
-    rasterizer.polygonMode  = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode     = VK_CULL_MODE_NONE;
-    rasterizer.lineWidth    = 1.0f;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.cullMode    = VK_CULL_MODE_NONE;
+    rasterizer.lineWidth   = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo multisampling{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
     multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -146,6 +158,9 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
     VkPipelineDepthStencilStateCreateInfo depthStencil{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
     depthStencil.depthTestEnable  = VK_FALSE;
     depthStencil.depthWriteEnable = VK_FALSE;
+
+    // Shared vertex shader module since both pipelines use the identical fullscreen triangle + view-ray reconstruction trick, so this is loaded once and reused for both.
+    VkShaderModule fullscreenVert = create_shader_module(device, "shaders/fullscreen.vert.spv");
 
     // Skybox pipeline: opaque background (NOTE: temporary?)
     VkPipelineColorBlendAttachmentState skyboxBlend{};
@@ -156,31 +171,29 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
     skyboxBlendState.attachmentCount = 1;
     skyboxBlendState.pAttachments    = &skyboxBlend;
 
-    VkShaderModule skyboxVert = create_shader_module(device, "shaders/skybox.vert.spv");
     VkShaderModule skyboxFrag = create_shader_module(device, "shaders/skybox.frag.spv");
     VkPipelineShaderStageCreateInfo skyboxStages[] = {
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,   skyboxVert, "main", nullptr },
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, skyboxFrag, "main", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,   fullscreenVert, "main", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, skyboxFrag,     "main", nullptr },
     };
 
     VkGraphicsPipelineCreateInfo skyboxInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-    skyboxInfo.stageCount           = 2;
-    skyboxInfo.pStages              = skyboxStages;
-    skyboxInfo.pVertexInputState    = &vertexInput;
-    skyboxInfo.pInputAssemblyState  = &inputAssembly;
-    skyboxInfo.pViewportState       = &viewportState;
-    skyboxInfo.pRasterizationState  = &rasterizer;
-    skyboxInfo.pMultisampleState    = &multisampling;
-    skyboxInfo.pDepthStencilState   = &depthStencil;
-    skyboxInfo.pColorBlendState     = &skyboxBlendState;
-    skyboxInfo.layout               = skyboxLayout;
-    skyboxInfo.renderPass           = renderPass;
-    skyboxInfo.subpass              = 0;
+    skyboxInfo.stageCount          = 2;
+    skyboxInfo.pStages             = skyboxStages;
+    skyboxInfo.pVertexInputState   = &vertexInput;
+    skyboxInfo.pInputAssemblyState = &inputAssembly;
+    skyboxInfo.pViewportState      = &viewportState;
+    skyboxInfo.pRasterizationState = &rasterizer;
+    skyboxInfo.pMultisampleState   = &multisampling;
+    skyboxInfo.pDepthStencilState  = &depthStencil;
+    skyboxInfo.pColorBlendState    = &skyboxBlendState;
+    skyboxInfo.layout              = skyboxLayout;
+    skyboxInfo.renderPass          = renderPass;
+    skyboxInfo.subpass             = 0;
 
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &skyboxInfo, nullptr, &skyboxPipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create skybox pipeline");
-    vkDestroyShaderModule(device, skyboxVert, nullptr);
-    vkDestroyShaderModule(device, skyboxFrag, nullptr);
+    vkDestroyShaderModule(device, skyboxFrag, nullptr);     // fullscreenVert is NOT destroyed here since the volume pipeline below still needs it.
 
     // Volume pipeline: alpha blended over the skybox 
     VkPipelineColorBlendAttachmentState volumeBlend{};
@@ -197,11 +210,10 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
     volumeBlendState.attachmentCount = 1;
     volumeBlendState.pAttachments    = &volumeBlend;
 
-    VkShaderModule volumeVert = create_shader_module(device, "shaders/fullscreen.vert.spv");
-    VkShaderModule volumeFrag = create_shader_module(device, "shaders/raymarch.frag.spv");
+    VkShaderModule raymarchFrag = create_shader_module(device, "shaders/raymarch.frag.spv");
     VkPipelineShaderStageCreateInfo volumeStages[] = {
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,   volumeVert, "main", nullptr },
-        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, volumeFrag, "main", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,   fullscreenVert, "main", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, raymarchFrag,   "main", nullptr },
     };
 
     VkGraphicsPipelineCreateInfo volumeInfo = skyboxInfo;   // reuse the fixed-function state, swap stages/layout/blend
@@ -212,8 +224,9 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
 
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &volumeInfo, nullptr, &volumePipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create volume pipeline");
-    vkDestroyShaderModule(device, volumeVert, nullptr);
-    vkDestroyShaderModule(device, volumeFrag, nullptr);
+
+    vkDestroyShaderModule(device, raymarchFrag, nullptr);
+    vkDestroyShaderModule(device, fullscreenVert, nullptr);
 }
 
 void GraphicsPipeline::cleanup(VkDevice device) {

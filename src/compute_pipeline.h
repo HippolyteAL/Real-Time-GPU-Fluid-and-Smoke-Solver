@@ -44,13 +44,16 @@ public:
 private:
     VkPipeline buoyancyPipeline;
     VkPipeline advectVelocityPipeline;
-    VkPipeline divergencePipeline;      // compute velocity divergence, feeds Jacobi
-    VkPipeline jacobiPipeline;
-    VkPipeline projectionPipeline;      // subtract pressure gradient
+    VkPipeline      divergencePipeline;      // compute velocity divergence, feeds Jacobi
+    VkImage         divergence;
+    VkImageView     divergenceView;
+    VkDeviceMemory  divergenceMemory;
+    VkPipeline  jacobiPipeline;
+    uint32_t    fieldPingPong = 0;          // velocity/density/temperature parity, flips once per record()
+    uint32_t    pressurePingPong = 0;       // pressure parity, flips once per Jacobi iteration, reset each frame
+    VkPipeline projectionPipeline;          // subtract pressure gradient
     VkPipeline advectScalarsPipeline;
     VkPipeline boundaryPipeline;
-    uint32_t fieldPingPong = 0;         // velocity/density/temperature parity, flips once per record()
-    uint32_t pressurePingPong = 0;      // pressure parity, flips once per Jacobi iteration, reset each frame
 
     VkPipelineLayout              layout;               // can be shared as long as push constant layout matches
     VkDescriptorSetLayout         descriptorSetLayout; 

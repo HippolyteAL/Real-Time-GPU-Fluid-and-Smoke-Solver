@@ -14,6 +14,18 @@ struct ComputePushConstants {
     uint32_t gridResolution;
 };
 
+std::string get_executable_dir() {
+    #ifdef _WIN32
+        char path[MAX_PATH];
+        GetModuleFileNameA(nullptr, path, MAX_PATH);
+        std::string full(path);
+        size_t pos = full.find_last_of("\\/");
+        return (pos == std::string::npos) ? "" : full.substr(0, pos + 1);
+    #else
+        #error "get_executable_dir: only Win32 implemented"
+    #endif
+}
+
 std::vector<char> read_file(const std::string& path) {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open()) throw std::runtime_error("failed to open shader file: " + path);
@@ -24,14 +36,14 @@ std::vector<char> read_file(const std::string& path) {
     return buffer;
 }
 
-VkShaderModule create_shader_module(VkDevice device, const std::string& path) {
-    std::vector<char> code = read_file(path);
+VkShaderModule create_shader_module(VkDevice device, const std::string& relativePath) {
+    std::vector<char> code = read_file(get_executable_dir() + relativePath);
     VkShaderModuleCreateInfo createInfo{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
     createInfo.codeSize = code.size();
     createInfo.pCode    = reinterpret_cast<const uint32_t*>(code.data());
     VkShaderModule module;
     if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS)
-        throw std::runtime_error("failed to create shader module: " + path);
+        throw std::runtime_error("failed to create shader module: " + relativePath);
     return module;
 }
 
@@ -77,9 +89,9 @@ void ComputePipeline::init(VkDevice device, uint32_t computeQueueFamily) {
     (void)computeQueueFamily;
 
     // Descriptor set layout 
-    // 8 storage image bindings: {velocity, density, pressure, temperature} x {slot0, slot1}. Every pass shares this one layout; each shader only reads the bindings it needs.
+    // 8 storage image bindings: {velocity, density, pressure, temperature} x {slot0, slot1} + divergence. Every pass shares this one layout; each shader only reads the bindings it needs.
     // TODO: revisit once real shaders exist (Placeholder binding scheme)
-    std::array<VkDescriptorSetLayoutBinding, 8> bindings{};
+    std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
     for (uint32_t i = 0; i < bindings.size(); ++i) {
         bindings[i].binding         = i;
         bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -112,7 +124,7 @@ void ComputePipeline::init(VkDevice device, uint32_t computeQueueFamily) {
     pressure parity flips once per Jacobi iteration and resets each frame. Four instances in one shared layout. */
     constexpr uint32_t kSetCount = 4;
 
-    VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8 * kSetCount };
+    VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9 * kSetCount };
     VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes    = &poolSize;

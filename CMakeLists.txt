@@ -52,3 +52,5 @@ if(WIN32)
             GLFW_EXPOSE_NATIVE_WIN32
     )
 endif()
+
+add_subdirectory(shaders)
