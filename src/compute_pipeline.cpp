@@ -15,6 +15,51 @@ struct ComputePushConstants {
     uint32_t gridResolution;
 };
 
+uint32_t find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & properties) == properties)
+            return i;
+    }
+    throw std::runtime_error("failed to find suitable memory type");
+}
+
+void create_grid_image(VkDevice device, VkPhysicalDevice physicalDevice, uint32_t resolution, VkFormat format, VkImage& image, VkDeviceMemory& memory, VkImageView& view)
+{
+    VkImageCreateInfo imageInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    imageInfo.imageType     = VK_IMAGE_TYPE_3D;
+    imageInfo.format        = format;
+    imageInfo.extent        = { resolution, resolution, resolution };
+    imageInfo.mipLevels     = 1;
+    imageInfo.arrayLayers   = 1;
+    imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    // STORAGE for compute imageLoad/imageStore, SAMPLED for the raymarch pass reading density/temperature
+    imageInfo.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS)
+        throw std::runtime_error("failed to create grid image");
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(device, image, &memReq);
+    VkMemoryAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocInfo.allocationSize  = memReq.size;
+    allocInfo.memoryTypeIndex = find_memory_type(physicalDevice, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &memory) != VK_SUCCESS)
+        throw std::runtime_error("failed to allocate grid image memory");
+    vkBindImageMemory(device, image, memory, 0);
+
+    VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    viewInfo.image    = image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    viewInfo.format   = format;
+    viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS)
+        throw std::runtime_error("failed to create grid image view");
+}
+
 std::string get_executable_dir() {
     #ifdef _WIN32
         char path[MAX_PATH];
@@ -312,4 +357,88 @@ void ComputePipeline::barrier(VkCommandBuffer cmd) {
     vkCmdPipelineBarrier(cmd,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
+void ComputePipeline::allocate_grid(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, FluidGridResources& grid, uint32_t resolution)
+{
+    grid.gridResolution = resolution;
+
+    // float4 for velocity (xyz used, w unused), scalar float for everything else, has to match fluid_common.hlsli's RWTexture3D<float4> / RWTexture3D<float> declarations exactly.
+    for (int i = 0; i < 2; ++i) {
+        create_grid_image(device, physicalDevice, resolution, VK_FORMAT_R32G32B32A32_SFLOAT, grid.velocity[i], grid.velocityMemory[i], grid.velocityView[i]);
+        create_grid_image(device, physicalDevice, resolution, VK_FORMAT_R32_SFLOAT, grid.density[i], grid.densityMemory[i], grid.densityView[i]);
+        create_grid_image(device, physicalDevice, resolution, VK_FORMAT_R32_SFLOAT, grid.pressure[i], grid.pressureMemory[i], grid.pressureView[i]);
+        create_grid_image(device, physicalDevice, resolution, VK_FORMAT_R32_SFLOAT, grid.temperature[i], grid.temperatureMemory[i], grid.temperatureView[i]);
+    }
+    create_grid_image(device, physicalDevice, resolution, VK_FORMAT_R32_SFLOAT, grid.divergence, grid.divergenceMemory, grid.divergenceView);
+
+    // One-time transition, UNDEFINED -> GENERAL, for all 9 images. GENERAL works for both storage image and sampled image access, which both compute and the raymarch pass need.
+    // NOTE: reviewing / fine-tuning might be an optimisation opotion later
+    VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    poolInfo.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = queueFamily;
+    VkCommandPool transientPool;
+    vkCreateCommandPool(device, &poolInfo, nullptr, &transientPool);
+
+    VkCommandBufferAllocateInfo cbAlloc{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbAlloc.commandPool        = transientPool;
+    cbAlloc.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbAlloc.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(device, &cbAlloc, &cmd);
+
+    VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    std::array<VkImage, 9> allImages = {
+        grid.velocity[0], grid.velocity[1], grid.density[0], grid.density[1],
+        grid.pressure[0], grid.pressure[1], grid.temperature[0], grid.temperature[1],
+        grid.divergence
+    };
+    std::vector<VkImageMemoryBarrier> barriers;
+    for (VkImage img : allImages) {
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image               = img;
+        b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask       = 0;
+        b.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barriers.push_back(b);
+    }
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers    = &cmd;
+    vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);                                 // one time stall at init
+
+    vkDestroyCommandPool(device, transientPool, nullptr);   // also frees cmd
+
+    std::cout << "[init] fluid grid allocated: " << resolution << "^3, 9 images transitioned to GENERAL\n";
+}
+
+void ComputePipeline::free_grid(VkDevice device, FluidGridResources& grid) {
+    for (int i = 0; i < 2; ++i) {
+        vkDestroyImageView(device, grid.velocityView[i], nullptr);
+        vkDestroyImage(device, grid.velocity[i], nullptr);
+        vkFreeMemory(device, grid.velocityMemory[i], nullptr);
+        vkDestroyImageView(device, grid.densityView[i], nullptr);
+        vkDestroyImage(device, grid.density[i], nullptr);
+        vkFreeMemory(device, grid.densityMemory[i], nullptr);
+        vkDestroyImageView(device, grid.pressureView[i], nullptr);
+        vkDestroyImage(device, grid.pressure[i], nullptr);
+        vkFreeMemory(device, grid.pressureMemory[i], nullptr);
+        vkDestroyImageView(device, grid.temperatureView[i], nullptr);
+        vkDestroyImage(device, grid.temperature[i], nullptr);
+        vkFreeMemory(device, grid.temperatureMemory[i], nullptr);
+    }
+    vkDestroyImageView(device, grid.divergenceView, nullptr);
+    vkDestroyImage(device, grid.divergence, nullptr);
+    vkFreeMemory(device, grid.divergenceMemory, nullptr);
 }

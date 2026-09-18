@@ -437,6 +437,7 @@ void VulkanContext::init_vulkan() {
     fluidGrid        = std::make_unique<FluidGridResources>();
 
     computePipeline->init(renderWindow.device, computeFamily, Constants::MAX_FRAMES_IN_FLIGHT, timestampPeriodNs);
+    computePipeline->allocate_grid(renderWindow.device, renderWindow.physicalDevice, renderWindow.graphicsQueue, computeFamily, *fluidGrid, Constants::GRID_RESOLUTION);
     graphicsPipeline->init(renderWindow.device, swapChain.imageFormat, swapChain.extent);
     graphicsPipeline->init_cubemap(renderWindow.device);
     frameResources->init(renderWindow.device, indices.graphicsFamily.value(), computeFamily);
@@ -462,6 +463,7 @@ void VulkanContext::cleanup() {
         vkDeviceWaitIdle(renderWindow.device);
     }
 
+    if (computePipeline && fluidGrid) computePipeline->free_grid(renderWindow.device, *fluidGrid);
     if (computePipeline)  computePipeline->cleanup(renderWindow.device);
     if (graphicsPipeline) graphicsPipeline->cleanup(renderWindow.device);
     if (frameResources)   frameResources->cleanup(renderWindow.device);

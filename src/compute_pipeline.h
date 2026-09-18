@@ -8,19 +8,22 @@
 
 // Simulation data
 struct FluidGridResources {
-    VkImage         velocity[2];            // needs ping-pong for advection
-    VkImageView     velocityView[2];
-    VkDeviceMemory  velocityMemory[2];
-    VkImage         density[2];
-    VkImageView     densityView[2];
-    VkDeviceMemory  densityMemory[2];
-    VkImage         pressure[2];            // needs ping-pong for Jacobi
-    VkImageView     pressureView[2];
-    VkDeviceMemory  pressureMemory[2];
-    VkImage         temperature[2];
-    VkImageView     temperatureView[2];
-    VkDeviceMemory  temperatureMemory[2];
-    uint32_t        gridResolution;         // Aiming for comfortable 128^3
+    VkImage         velocity[2]             = { VK_NULL_HANDLE, VK_NULL_HANDLE };    // needs ping-pong for advection
+    VkImageView     velocityView[2]         = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory  velocityMemory[2]       = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkImage         density[2]              = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkImageView     densityView[2]          = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory  densityMemory[2]        = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkImage         pressure[2]             = { VK_NULL_HANDLE, VK_NULL_HANDLE };    // needs ping-pong for Jacobi
+    VkImageView     pressureView[2]         = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory  pressureMemory[2]       = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkImage         temperature[2]          = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkImageView     temperatureView[2]      = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory  temperatureMemory[2]    = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkImage         divergence              = VK_NULL_HANDLE;
+    VkImageView     divergenceView          = VK_NULL_HANDLE;
+    VkDeviceMemory  divergenceMemory        = VK_NULL_HANDLE;
+    uint32_t        gridResolution          = 0;                                    // Aiming for comfortable 128^3
 };
 
 class ComputePipeline {
@@ -41,6 +44,8 @@ public:
     void record_advect_scalars(VkCommandBuffer cmd, const FluidGridResources& grid, float dt);  // density + temperature, post-projection
     void record_boundary(VkCommandBuffer cmd, const FluidGridResources& grid);
     uint32_t current_field_index() const { return fieldPingPong; }                              // lets GraphicsPipeline know which buffer to sample
+    void allocate_grid(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, FluidGridResources& grid, uint32_t resolution);
+    void free_grid(VkDevice device, FluidGridResources& grid);
 
     uint32_t jacobiIterations = 40;   // runtime tunable
 
@@ -64,9 +69,6 @@ private:
     VkPipeline      buoyancyPipeline;
     VkPipeline      advectVelocityPipeline;
     VkPipeline      divergencePipeline;         // compute velocity divergence, feeds Jacobi
-    VkImage         divergence;
-    VkImageView     divergenceView;
-    VkDeviceMemory  divergenceMemory;
     VkPipeline      jacobiPipeline;
     uint32_t        fieldPingPong = 0;          // velocity/density/temperature parity, flips once per record()
     uint32_t        pressurePingPong = 0;       // pressure parity, flips once per Jacobi iteration, reset each frame

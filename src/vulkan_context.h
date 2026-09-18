@@ -22,6 +22,7 @@ namespace Constants {
     inline constexpr std::array<const char*, 1> DEVICE_EXTENSIONS = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
+    inline constexpr uint32_t GRID_RESOLUTION = 64;     // TODO: 64^2 for now, ultimately aiming for 128^3 
 }
 
 // These structs hold temporary values needed for initialization, easier to handle when grouped
