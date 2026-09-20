@@ -36,7 +36,7 @@ void create_grid_image(VkDevice device, VkPhysicalDevice physicalDevice, uint32_
     imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
     // STORAGE for compute imageLoad/imageStore, SAMPLED for the raymarch pass reading density/temperature
-    imageInfo.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS)
@@ -171,22 +171,22 @@ void ComputePipeline::init(VkDevice device, uint32_t computeQueueFamily, uint32_
     // Descriptor pool & sets
     /* 4 sets = 2 (field parity) x 2 (pressure parity): index = fieldPingPong*2 + pressurePingPong. Field parity (velocity/density/temperature) flips once per record(); 
     pressure parity flips once per Jacobi iteration and resets each frame. Four instances in one shared layout. */
-    constexpr uint32_t kSetCount = 4;
+    constexpr uint32_t SET_COUNT = 4;
 
-    VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9 * kSetCount };
+    VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9 * SET_COUNT };
     VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes    = &poolSize;
-    poolInfo.maxSets       = kSetCount;
+    poolInfo.maxSets       = SET_COUNT;
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
         throw std::runtime_error("failed to create compute descriptor pool");
 
-    std::vector<VkDescriptorSetLayout> setLayouts(kSetCount, descriptorSetLayout);
+    std::vector<VkDescriptorSetLayout> setLayouts(SET_COUNT, descriptorSetLayout);
     VkDescriptorSetAllocateInfo dsAlloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     dsAlloc.descriptorPool     = descriptorPool;
-    dsAlloc.descriptorSetCount = kSetCount;
+    dsAlloc.descriptorSetCount = SET_COUNT;
     dsAlloc.pSetLayouts        = setLayouts.data();
-    descriptorSets.resize(kSetCount);
+    descriptorSets.resize(SET_COUNT);
     if (vkAllocateDescriptorSets(device, &dsAlloc, descriptorSets.data()) != VK_SUCCESS)
         throw std::runtime_error("failed to allocate compute descriptor sets");
     // TODO: vkUpdateDescriptorSets x4 — needs FluidGridResources' actual VkImageView handles, which don't exist until grid allocation is implemented.
@@ -406,10 +406,15 @@ void ComputePipeline::allocate_grid(VkDevice device, VkPhysicalDevice physicalDe
         b.image               = img;
         b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         b.srcAccessMask       = 0;
-        b.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         barriers.push_back(b);
     }
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+    VkClearColorValue zero{};
+    VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    for (VkImage img : allImages) {
+        vkCmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+    }
     vkEndCommandBuffer(cmd);
 
     VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -441,4 +446,35 @@ void ComputePipeline::free_grid(VkDevice device, FluidGridResources& grid) {
     vkDestroyImageView(device, grid.divergenceView, nullptr);
     vkDestroyImage(device, grid.divergence, nullptr);
     vkFreeMemory(device, grid.divergenceMemory, nullptr);
+}
+
+void ComputePipeline::update_descriptor_sets(VkDevice device, const FluidGridResources& grid) {
+    // Views are permanent once allocated, only the read and write slots change.
+    for (uint32_t fieldPP = 0; fieldPP < 2; ++fieldPP) {
+        for (uint32_t pressPP = 0; pressPP < 2; ++pressPP) {
+            VkDescriptorSet set = descriptorSets[fieldPP * 2 + pressPP];
+
+            std::array<VkDescriptorImageInfo, 9> imageInfos{};
+            imageInfos[0] = { VK_NULL_HANDLE, grid.velocityView[fieldPP],        VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[1] = { VK_NULL_HANDLE, grid.velocityView[1 - fieldPP],    VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[2] = { VK_NULL_HANDLE, grid.densityView[fieldPP],         VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[3] = { VK_NULL_HANDLE, grid.densityView[1 - fieldPP],     VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[4] = { VK_NULL_HANDLE, grid.pressureView[pressPP],        VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[5] = { VK_NULL_HANDLE, grid.pressureView[1 - pressPP],    VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[6] = { VK_NULL_HANDLE, grid.temperatureView[fieldPP],     VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[7] = { VK_NULL_HANDLE, grid.temperatureView[1 - fieldPP], VK_IMAGE_LAYOUT_GENERAL };
+            imageInfos[8] = { VK_NULL_HANDLE, grid.divergenceView,               VK_IMAGE_LAYOUT_GENERAL };
+
+            std::array<VkWriteDescriptorSet, 9> writes{};
+            for (uint32_t b = 0; b < 9; ++b) {
+                writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[b].dstSet          = set;
+                writes[b].dstBinding      = b;
+                writes[b].descriptorCount = 1;
+                writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                writes[b].pImageInfo      = &imageInfos[b];
+            }
+            vkUpdateDescriptorSets(device, 9, writes.data(), 0, nullptr);
+        }
+    }
 }

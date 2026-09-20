@@ -8,7 +8,9 @@
 #include <GLFW/glfw3native.h>       // Needs system to be defined in CMakeList.txt
 
 #include <glm/glm.hpp>                  
-#include <glm/gtc/constants.hpp>    // Camera
+#include <glm/gtc/constants.hpp>            // Camera
+#include <glm/ext/matrix_transform.hpp>     // Camera  
+#include <glm/ext/matrix_clip_space.hpp>    // For glm::perspective, moved from matrix_transform for some reason       
 
 #include <algorithm>
 #include <cstring>
@@ -20,6 +22,38 @@
 /* Implementation detail helpers. None of these need anything beyond what's passed in, 
 so there's no reason to give them access to VulkanContext's private state. */
 namespace {
+
+void create_framebuffers(VkDevice device, SwapChain& sc, VkRenderPass renderPass) {
+    sc.framebuffers.resize(sc.imageViews.size());
+    for (size_t i = 0; i < sc.imageViews.size(); ++i) {
+        VkImageView attachments[] = { sc.imageViews[i] };
+        VkFramebufferCreateInfo fbInfo{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fbInfo.renderPass      = renderPass;
+        fbInfo.attachmentCount = 1;
+        fbInfo.pAttachments    = attachments;
+        fbInfo.width           = sc.extent.width;
+        fbInfo.height          = sc.extent.height;
+        fbInfo.layers          = 1;
+        if (vkCreateFramebuffer(device, &fbInfo, nullptr, &sc.framebuffers[i]) != VK_SUCCESS)
+            throw std::runtime_error("failed to create framebuffer");
+    }
+}
+
+CameraPushConstants build_camera_push_constants(const Camera& camera, float aspectRatio) {
+    float x = camera.camDistance * std::sin(camera.camPolar) * std::cos(camera.camAzimuth);
+    float y = camera.camDistance * std::cos(camera.camPolar);
+    float z = camera.camDistance * std::sin(camera.camPolar) * std::sin(camera.camAzimuth);
+    glm::vec3 eye(x, y, z), target(0.0f), up(0.0f, 1.0f, 0.0f);
+
+    glm::mat4 view = glm::lookAt(eye, target, up);
+    glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspectRatio, 0.01f, 100.0f);
+    proj[1][1] *= -1.0f;   // GLM assumes OpenGL's Y-up clip space; Vulkan's is flipped
+
+    CameraPushConstants pc{};
+    pc.invViewProj = glm::inverse(proj * view);
+    pc.rayOrigin   = eye;
+    return pc;
+}
 
 bool check_validation_layer_support() {
     uint32_t layerCount = 0;
@@ -260,21 +294,68 @@ VulkanContext::~VulkanContext() {
 }
 
 void VulkanContext::render_loop() {
+    auto lastTime = std::chrono::high_resolution_clock::now();
+    uint32_t logCounter = 0;
+
     while (!glfwWindowShouldClose(renderWindow.window)) {
         process_input();
-        
-        // TODO: uint32_t imageIndex = frameResources->begin_frame(...);
-        // TODO: computePipeline->record(...) on the compute cmd buffer, submit
-        // TODO: graphicsPipeline->record_skybox(...) / record_volume(...), submit
-        // TODO: frameResources->present(...)
+
+        auto now = std::chrono::high_resolution_clock::now();
+        float dt = std::chrono::duration<float>(now - lastTime).count();
+        lastTime = now;
+        dt = std::min(dt, 1.0f / 30.0f);    // clamp against a debugger pause or stall
+
+        uint32_t frameIndex = frameResources->current_frame_index();
+        computePipeline->read_timestamp_results(renderWindow.device, frameIndex);   // pull last frame's timings first
+
+        uint32_t imageIndex = frameResources->begin_frame(renderWindow.device, swapChain.swapChain);
+
+        // Compute
+        VkCommandBuffer computeCmd = frameResources->acquire_compute_cmd_buffer();
+        VkCommandBufferBeginInfo cbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(computeCmd, &cbi);
+        computePipeline->record(computeCmd, *fluidGrid, dt, frameIndex);
+        vkEndCommandBuffer(computeCmd);
+        frameResources->submit_compute(renderWindow.graphicsQueue, computeCmd);
+
+        // Graphics
+        // No explicit barrier needed here: FrameResources::submit_graphics already waits oncomputeFinishedSemaphore before the fragment stage.
+        VkCommandBuffer graphicsCmd = frameResources->acquire_graphics_cmd_buffer();
+        vkBeginCommandBuffer(graphicsCmd, &cbi);
+
+        uint32_t currentField = computePipeline->current_field_index();
+        CameraPushConstants cam = build_camera_push_constants(camera, static_cast<float>(swapChain.extent.width) / swapChain.extent.height);
+
+        graphicsPipeline->record_skybox(graphicsCmd, swapChain.framebuffers[imageIndex], swapChain.extent);
+        graphicsPipeline->record_volume(graphicsCmd, *fluidGrid, cam, currentField);
+
+        vkEndCommandBuffer(graphicsCmd);
+        frameResources->submit_graphics(renderWindow.graphicsQueue, graphicsCmd);
+
+        frameResources->present(renderWindow.presentQueue, swapChain.swapChain, imageIndex);
+
+        // NOTE: arbitrary timing, might be worth looking into later
+        if (++logCounter >= 60) {
+            computePipeline->log_timings();
+            logCounter = 0;
+        }
     }
-    
+
     vkDeviceWaitIdle(renderWindow.device);
 }
 
 void VulkanContext::process_input() {
     glfwPollEvents();
-    // TODO: camera orbit/zoom key handling (nothing to see yet)
+    if (glfwGetKey(renderWindow.window, GLFW_KEY_LEFT)  == GLFW_PRESS) camera.camAzimuth -= camera.CAM_ORBIT_SPEED;
+    if (glfwGetKey(renderWindow.window, GLFW_KEY_RIGHT) == GLFW_PRESS) camera.camAzimuth += camera.CAM_ORBIT_SPEED;
+    if (glfwGetKey(renderWindow.window, GLFW_KEY_UP)    == GLFW_PRESS) camera.camPolar   -= camera.CAM_ORBIT_SPEED;
+    if (glfwGetKey(renderWindow.window, GLFW_KEY_DOWN)  == GLFW_PRESS) camera.camPolar   += camera.CAM_ORBIT_SPEED;
+    camera.camPolar = std::clamp(camera.camPolar, camera.CAM_POLAR_MIN, camera.CAM_POLAR_MAX);
+
+    if (glfwGetKey(renderWindow.window, GLFW_KEY_W) == GLFW_PRESS) camera.camDistance -= camera.CAM_ZOOM_SPEED * 0.016f;
+    if (glfwGetKey(renderWindow.window, GLFW_KEY_S) == GLFW_PRESS) camera.camDistance += camera.CAM_ZOOM_SPEED * 0.016f;
+    camera.camDistance = std::max(camera.camDistance, camera.CAM_DIST_MIN);
 }
 void VulkanContext::init_window(uint32_t width, uint32_t height) {
     glfwInit();
@@ -438,8 +519,12 @@ void VulkanContext::init_vulkan() {
 
     computePipeline->init(renderWindow.device, computeFamily, Constants::MAX_FRAMES_IN_FLIGHT, timestampPeriodNs);
     computePipeline->allocate_grid(renderWindow.device, renderWindow.physicalDevice, renderWindow.graphicsQueue, computeFamily, *fluidGrid, Constants::GRID_RESOLUTION);
+    computePipeline->update_descriptor_sets(renderWindow.device, *fluidGrid);
+
     graphicsPipeline->init(renderWindow.device, swapChain.imageFormat, swapChain.extent);
-    graphicsPipeline->init_cubemap(renderWindow.device);
+    create_framebuffers(renderWindow.device, swapChain, graphicsPipeline->render_pass());
+    graphicsPipeline->init_cubemap(renderWindow.device, renderWindow.physicalDevice, renderWindow.graphicsQueue, indices.graphicsFamily.value(), "assets\\skybox\\Cubemap_Snowy_01-512x512.png");
+    graphicsPipeline->update_descriptor_sets(renderWindow.device, *fluidGrid);
     frameResources->init(renderWindow.device, indices.graphicsFamily.value(), computeFamily);
 
     std::cout << "[init] compute pipeline, graphics pipeline, and frame resources constructed\n";
@@ -467,10 +552,9 @@ void VulkanContext::cleanup() {
     if (computePipeline)  computePipeline->cleanup(renderWindow.device);
     if (graphicsPipeline) graphicsPipeline->cleanup(renderWindow.device);
     if (frameResources)   frameResources->cleanup(renderWindow.device);
-
-    // TODO: destroy fluidGrid's images/views/memory and cubemap's image/view/sampler
-    //       once their allocation is implemented — nothing to free yet.
-
+    for (VkFramebuffer fb : swapChain.framebuffers) {
+        vkDestroyFramebuffer(renderWindow.device, fb, nullptr);
+    }
     for (VkImageView view : swapChain.imageViews) {
         vkDestroyImageView(renderWindow.device, view, nullptr);
     }

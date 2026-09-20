@@ -1,12 +1,46 @@
 #include "graphics_pipeline.h"
 #include "compute_pipeline.h"   // full definition of FluidGridResources needed here
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include <array>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
 namespace {
+
+struct CubeFacePlacement { int col; int row; };
+// Vulkan/OpenGL cube array layer order: +X, -X, +Y, -Y, +Z, -Z
+constexpr CubeFacePlacement kFaceLayout[6] = {
+    { 2, 1 },  // +X
+    { 0, 1 },  // -X
+    { 1, 0 },  // +Y
+    { 1, 2 },  // -Y
+    { 1, 1 },  // +Z
+    { 3, 1 },  // -Z
+};
+
+void extract_face(const uint8_t* src, int srcWidth, int faceSize, int col, int row, uint8_t* dst) {
+    constexpr int channels = 4;
+    for (int y = 0; y < faceSize; ++y) {
+        const uint8_t* srcRow = src + ((row * faceSize + y) * srcWidth + col * faceSize) * channels;
+        uint8_t* dstRow = dst + y * faceSize * channels;
+        std::memcpy(dstRow, srcRow, faceSize * channels);
+    }
+}
+
+uint32_t find_memory_type(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & properties) == properties)
+            return i;
+    }
+    throw std::runtime_error("failed to find suitable memory type");
+}
 
 std::string get_executable_dir() {
     #ifdef _WIN32
@@ -278,10 +312,173 @@ void GraphicsPipeline::record_volume(VkCommandBuffer cmd, const FluidGridResourc
     vkCmdEndRenderPass(cmd);   // closes the pass record_skybox opened
 }
 
-void GraphicsPipeline::init_cubemap(VkDevice device) {
-    // Stub for now
-    // TODO later: pick an image-loading library (stb_image probably), load each of the 6 faces, create a VK_IMAGE_VIEW_TYPE_CUBE
-    // image + view + sampler, populate cubemap's fields, set skyboxEnabled = 1
-    (void)device;
-    // cubemap.skyboxEnabled = 1u;
+void GraphicsPipeline::init_cubemap(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, const std::string& crossImagePath)
+{
+    std::string fullPath = get_executable_dir() + crossImagePath;
+
+    int srcWidth, srcHeight, srcChannels;
+    uint8_t* pixels = stbi_load(fullPath.c_str(), &srcWidth, &srcHeight, &srcChannels, STBI_rgb_alpha);
+    if (!pixels) {
+       throw std::runtime_error("failed to load cubemap cross image: " + fullPath + " (stb reason: " + stbi_failure_reason() + ")");
+    }
+
+    if (srcWidth % 4 != 0 || srcHeight % 3 != 0 || (srcWidth / 4) != (srcHeight / 3)) {
+        stbi_image_free(pixels);
+        throw std::runtime_error("cubemap image is not a 4x3 horizontal cross with square faces: " + fullPath);
+    }
+    const int faceSize = srcWidth / 4;
+
+    // sRGB: matches the swapchain's own sRGB surface format from chooseSwapSurfaceFormat.
+    constexpr VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+
+    VkImageCreateInfo imageInfo{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    imageInfo.flags         = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    imageInfo.imageType     = VK_IMAGE_TYPE_2D;
+    imageInfo.format        = format;
+    imageInfo.extent        = { static_cast<uint32_t>(faceSize), static_cast<uint32_t>(faceSize), 1 };
+    imageInfo.mipLevels     = 1;
+    imageInfo.arrayLayers   = 6;
+    imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage         = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(device, &imageInfo, nullptr, &cubemap.cubemapImage) != VK_SUCCESS) {
+        stbi_image_free(pixels);
+        throw std::runtime_error("failed to create cubemap image");
+    }
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(device, cubemap.cubemapImage, &memReq);
+    VkMemoryAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    allocInfo.allocationSize  = memReq.size;
+    allocInfo.memoryTypeIndex = find_memory_type(physicalDevice, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &cubemap.cubemapMemory) != VK_SUCCESS) {
+        stbi_image_free(pixels);
+        throw std::runtime_error("failed to allocate cubemap memory");
+    }
+    vkBindImageMemory(device, cubemap.cubemapImage, cubemap.cubemapMemory, 0);
+
+    VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    viewInfo.image      = cubemap.cubemapImage;
+    viewInfo.viewType   = VK_IMAGE_VIEW_TYPE_CUBE;
+    viewInfo.format     = format;
+    viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+    if (vkCreateImageView(device, &viewInfo, nullptr, &cubemap.cubemapImageView) != VK_SUCCESS) {
+        stbi_image_free(pixels);
+        throw std::runtime_error("failed to create cubemap image view");
+    }
+
+    VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    samplerInfo.magFilter = samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = samplerInfo.addressModeV = samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    if (vkCreateSampler(device, &samplerInfo, nullptr, &cubemap.cubemapSampler) != VK_SUCCESS) {
+        stbi_image_free(pixels);
+        throw std::runtime_error("failed to create cubemap sampler");
+    }
+
+    // Staging buffer: extract the 6 cross arm faces into layer ordered data
+    VkDeviceSize faceBytes  = static_cast<VkDeviceSize>(faceSize) * faceSize * 4;
+    VkDeviceSize bufferSize = faceBytes * 6;
+
+    VkBufferCreateInfo bufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bufferInfo.size         = bufferSize;
+    bufferInfo.usage        = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufferInfo.sharingMode  = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer stagingBuffer;
+    vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer);
+
+    VkMemoryRequirements bufMemReq;
+    vkGetBufferMemoryRequirements(device, stagingBuffer, &bufMemReq);
+    VkMemoryAllocateInfo bufAllocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    bufAllocInfo.allocationSize  = bufMemReq.size;
+    bufAllocInfo.memoryTypeIndex = find_memory_type(physicalDevice, bufMemReq.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkDeviceMemory stagingMemory;
+    vkAllocateMemory(device, &bufAllocInfo, nullptr, &stagingMemory);
+    vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
+
+    void* mapped;
+    vkMapMemory(device, stagingMemory, 0, bufferSize, 0, &mapped);
+    for (int layer = 0; layer < 6; ++layer) {
+        extract_face(pixels, srcWidth, faceSize, kFaceLayout[layer].col, kFaceLayout[layer].row, static_cast<uint8_t*>(mapped) + layer * faceBytes);
+    }
+    vkUnmapMemory(device, stagingMemory);
+    stbi_image_free(pixels);
+
+    // Upload: one copy region covering all 6 layers since staging data is packed in layer order
+    VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    poolInfo.flags              = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex   = queueFamily;
+    VkCommandPool transientPool;
+    vkCreateCommandPool(device, &poolInfo, nullptr, &transientPool);
+
+    VkCommandBufferAllocateInfo cbAlloc{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbAlloc.commandPool         = transientPool;
+    cbAlloc.level               = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbAlloc.commandBufferCount  = 1;
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(device, &cbAlloc, &cmd);
+
+    VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    VkImageMemoryBarrier toDst{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    toDst.oldLayout             = VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.newLayout             = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex   = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex   = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image                 = cubemap.cubemapImage;
+    toDst.subresourceRange      = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+    toDst.dstAccessMask         = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 6 };
+    copyRegion.imageExtent      = { static_cast<uint32_t>(faceSize), static_cast<uint32_t>(faceSize), 1 };
+    vkCmdCopyBufferToImage(cmd, stagingBuffer, cubemap.cubemapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+    VkImageMemoryBarrier toRead = toDst;
+    toRead.oldLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toRead.newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toRead.srcAccessMask    = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toRead.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toRead);
+
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submit.commandBufferCount   = 1;
+    submit.pCommandBuffers      = &cmd;
+    vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+
+    vkDestroyCommandPool(device, transientPool, nullptr);
+    vkDestroyBuffer(device, stagingBuffer, nullptr);
+    vkFreeMemory(device, stagingMemory, nullptr);
+
+    cubemap.skyboxEnabled = 1u;
+    std::cout << "[init] cubemap loaded from " << fullPath << " (" << faceSize << "x" << faceSize << " per face)\n";
+}
+
+void GraphicsPipeline::update_descriptor_sets(VkDevice device, const FluidGridResources& grid) {
+    for (uint32_t i = 0; i < 2; ++i) {
+        VkDescriptorImageInfo cubemapInfo{ cubemap.cubemapSampler, cubemap.cubemapImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo densityInfo{ volumeSampler, grid.densityView[i], VK_IMAGE_LAYOUT_GENERAL };
+        VkDescriptorImageInfo temperatureInfo{ volumeSampler, grid.temperatureView[i], VK_IMAGE_LAYOUT_GENERAL };
+
+        std::array<VkWriteDescriptorSet, 3> writes{};
+        for (auto& w : writes) {
+            w.sType             = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet            = descriptorSets[i];
+            w.descriptorCount   = 1;
+            w.descriptorType    = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        }
+        writes[0].dstBinding    = 0; writes[0].pImageInfo = &cubemapInfo;
+        writes[1].dstBinding    = 1; writes[1].pImageInfo = &densityInfo;
+        writes[2].dstBinding    = 2; writes[2].pImageInfo = &temperatureInfo;
+
+        vkUpdateDescriptorSets(device, 3, writes.data(), 0, nullptr);
+    }
 }

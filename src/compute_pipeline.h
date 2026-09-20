@@ -46,6 +46,7 @@ public:
     uint32_t current_field_index() const { return fieldPingPong; }                              // lets GraphicsPipeline know which buffer to sample
     void allocate_grid(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, FluidGridResources& grid, uint32_t resolution);
     void free_grid(VkDevice device, FluidGridResources& grid);
+    void update_descriptor_sets(VkDevice device, const FluidGridResources& grid);
 
     uint32_t jacobiIterations = 40;   // runtime tunable
 

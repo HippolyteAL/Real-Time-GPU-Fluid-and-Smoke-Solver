@@ -17,6 +17,7 @@ public:
     void submit_compute(VkQueue computeQueue, VkCommandBuffer cmd);
     void submit_graphics(VkQueue graphicsQueue, VkCommandBuffer cmd);
     void present(VkQueue presentQueue, VkSwapchainKHR swapChain, uint32_t imageIndex);
+    uint32_t current_frame_index() const { return currentFrame; }
 private:
     VkCommandPool                 computePool, graphicsPool;
     std::vector<VkCommandBuffer>  computeCmdBuffers, graphicsCmdBuffers;
@@ -24,7 +25,6 @@ private:
     std::vector<VkSemaphore>      computeFinishedSemaphores, renderFinishedSemaphores;
     std::vector<VkFence>          inFlightFences;
     uint32_t                      currentFrame = 0;
-    uint32_t current_frame_index() const { return currentFrame; }
 };
 
 #endif // FRAME_RESOURCES_H

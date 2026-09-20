@@ -54,3 +54,15 @@ if(WIN32)
 endif()
 
 add_subdirectory(shaders)
+
+target_include_directories(VulkanFluidSolver PRIVATE includes)
+
+if(EXISTS ${CMAKE_SOURCE_DIR}/assets)
+    add_custom_command(TARGET VulkanFluidSolver POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:VulkanFluidSolver>/assets
+        COMMENT "Copying assets/ to output directory"
+    )
+else()
+    message(STATUS "assets/ not found (gitignored) — skipping asset copy")
+endif()

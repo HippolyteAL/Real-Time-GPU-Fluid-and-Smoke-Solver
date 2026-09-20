@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 struct FluidGridResources;
@@ -30,9 +31,12 @@ public:
     void init(VkDevice device, VkFormat swapChainImageFormat, VkExtent2D extent);
     void cleanup(VkDevice device);
     void record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuffer, VkExtent2D extent);
-    void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera, uint32_t currentFieldIndex);       
-    // Cubemap: right, left, top, bottom, front, back
-    void init_cubemap(VkDevice device);
+    void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera, uint32_t currentFieldIndex);    
+    // Single image setup, rather than individual faces. -90deg rotated cross shape
+    void init_cubemap(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, const std::string& crossImagePath);  
+    void update_descriptor_sets(VkDevice device, const FluidGridResources& grid);
+
+    VkRenderPass render_pass() const { return renderPass; }   // needed by VulkanContext to build framebuffers
 
 private:
     VkRenderPass                    renderPass;
