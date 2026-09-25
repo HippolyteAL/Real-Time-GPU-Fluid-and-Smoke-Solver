@@ -28,6 +28,8 @@ struct FluidGridResources {
 
 class ComputePipeline {
 public:
+    uint32_t jacobiIterations = 40;   // runtime tunable
+
     void init(VkDevice device, uint32_t computeQueueFamily, uint32_t framesInFlight, float timestampPeriod);
     void cleanup(VkDevice device);
     // Orchestrates one full timestep in dependency order, inserting barriers between passes. This is what render_loop() should call normally.
@@ -47,13 +49,13 @@ public:
     void allocate_grid(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, FluidGridResources& grid, uint32_t resolution);
     void free_grid(VkDevice device, FluidGridResources& grid);
     void update_descriptor_sets(VkDevice device, const FluidGridResources& grid);
-
-    uint32_t jacobiIterations = 40;   // runtime tunable
+    void record_inject(VkCommandBuffer cmd, const FluidGridResources& grid, float dt);
 
 private:
     // Performance logging enum
     enum TimingRegion : uint32_t {
-        kTimingBuoyancy = 0,
+        kTimingInject = 0,
+        kTimingBuoyancy,
         kTimingAdvectVelocity,
         kTimingBoundaryPre,     // boundary enforcement before the pressure solve
         kTimingDivergence,
@@ -67,15 +69,17 @@ private:
     float                    timestampPeriodNs = 1.0f;              // VkPhysicalDeviceLimits::timestampPeriod
     float                    lastTimings[kTimingRegionCount] = {};
 
-    VkPipeline      buoyancyPipeline;
-    VkPipeline      advectVelocityPipeline;
-    VkPipeline      divergencePipeline;         // compute velocity divergence, feeds Jacobi
-    VkPipeline      jacobiPipeline;
-    uint32_t        fieldPingPong = 0;          // velocity/density/temperature parity, flips once per record()
-    uint32_t        pressurePingPong = 0;       // pressure parity, flips once per Jacobi iteration, reset each frame
-    VkPipeline      projectionPipeline;         // subtract pressure gradient
-    VkPipeline      advectScalarsPipeline;
-    VkPipeline      boundaryPipeline;
+    VkPipeline  injectPipeline;  // Heat and density injection
+
+    VkPipeline  buoyancyPipeline;
+    VkPipeline  advectVelocityPipeline;
+    VkPipeline  divergencePipeline;         // compute velocity divergence, feeds Jacobi
+    VkPipeline  jacobiPipeline;
+    uint32_t    fieldPingPong = 0;          // velocity/density/temperature parity, flips once per record()
+    uint32_t    pressurePingPong = 0;       // pressure parity, flips once per Jacobi iteration, reset each frame
+    VkPipeline  projectionPipeline;         // subtract pressure gradient
+    VkPipeline  advectScalarsPipeline;
+    VkPipeline  boundaryPipeline;
 
     VkPipelineLayout              layout;               // can be shared as long as push constant layout matches
     VkDescriptorSetLayout         descriptorSetLayout; 

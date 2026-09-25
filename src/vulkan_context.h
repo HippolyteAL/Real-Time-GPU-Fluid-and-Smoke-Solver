@@ -66,7 +66,7 @@ struct Camera {
     float camAzimuth        = glm::radians(0.0f);   // horizontal angle from the meridian 0
     float camPolar          = glm::radians(90.0f);  // vertical angle from pole
     float camDistance       = 3.0f;
-    float CAM_ORBIT_SPEED   = 0.02f;
+    float CAM_ORBIT_SPEED   = 0.002f;
     float CAM_ZOOM_SPEED    = 0.5f;
     float CAM_DIST_MIN      = 0.01f;
     float CAM_POLAR_MIN     = std::acos(0.999f);

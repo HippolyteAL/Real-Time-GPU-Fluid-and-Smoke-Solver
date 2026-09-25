@@ -29,6 +29,7 @@ add_hlsl_shader(boundary.comp           boundary.hlsl           cs_6_0)
 add_hlsl_shader(fullscreen.vert         fullscreen.vert.hlsl    vs_6_0)
 add_hlsl_shader(skybox.frag             skybox.frag.hlsl        ps_6_0)
 add_hlsl_shader(raymarch.frag           raymarch.frag.hlsl      ps_6_0)
+add_hlsl_shader(inject.comp             inject.hlsl             cs_6_0)
 
 add_custom_target(shaders ALL DEPENDS ${SHADER_OUTPUTS})
 add_dependencies(${PROJECT_NAME} shaders)

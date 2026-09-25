@@ -4,10 +4,10 @@
 [[vk::binding(2,0)]] [[vk::combinedImageSampler]] Texture3D    temperatureTexture;
 [[vk::binding(2,0)]] [[vk::combinedImageSampler]] SamplerState temperatureSampler;
 
-struct CameraPushConstants { float4x4 invViewProj; float3 rayOrigin; float _pad; };
-[[vk::push_constant]] CameraPushConstants camera;
+struct CameraUBO { float4x4 invViewProj; float3 rayOrigin; float _pad; };
+[[vk::binding(0, 1)]] ConstantBuffer<CameraUBO> camera;
 
-struct VSOutput { float4 position : SV_Position; float3 viewDir : TEXCOORD0; };
+struct VSOutput { float4 position : SV_Position; float3 worldPos : TEXCOORD0; };
 
 static const int    STEP_COUNT = 64;
 static const float  ABSORPTION = 4.0;
@@ -25,7 +25,7 @@ bool intersect_box(float3 origin, float3 dir, out float tNear, out float tFar) {
 
 float4 main(VSOutput input) : SV_Target {
     float3 origin = camera.rayOrigin;
-    float3 dir    = normalize(input.viewDir);
+    float3 dir = normalize(input.worldPos - camera.rayOrigin);
     float tNear, tFar;
     if (!intersect_box(origin, dir, tNear, tFar)) discard;
     tNear = max(tNear, 0.0);

@@ -9,8 +9,7 @@
 
 #include <glm/glm.hpp>                  
 #include <glm/gtc/constants.hpp>            // Camera
-#include <glm/ext/matrix_transform.hpp>     // Camera  
-#include <glm/ext/matrix_clip_space.hpp>    // For glm::perspective, moved from matrix_transform for some reason       
+#include <glm/ext/matrix_transform.hpp>     // Camera    
 
 #include <algorithm>
 #include <cstring>
@@ -39,20 +38,38 @@ void create_framebuffers(VkDevice device, SwapChain& sc, VkRenderPass renderPass
     }
 }
 
-CameraPushConstants build_camera_push_constants(const Camera& camera, float aspectRatio) {
+CameraUBO build_camera_ubo(const Camera& camera, float aspectRatio) {
     float x = camera.camDistance * std::sin(camera.camPolar) * std::cos(camera.camAzimuth);
     float y = camera.camDistance * std::cos(camera.camPolar);
     float z = camera.camDistance * std::sin(camera.camPolar) * std::sin(camera.camAzimuth);
-    glm::vec3 eye(x, y, z), target(0.0f), up(0.0f, 1.0f, 0.0f);
 
-    glm::mat4 view = glm::lookAt(eye, target, up);
-    glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspectRatio, 0.01f, 100.0f);
-    proj[1][1] *= -1.0f;   // GLM assumes OpenGL's Y-up clip space; Vulkan's is flipped
+    glm::vec3 eye(x, y, z);
+    glm::vec3 forward = glm::normalize(-eye);
+    glm::vec3 right   = glm::normalize(glm::cross(forward, {0, 1, 0}));
+    glm::vec3 up      = glm::cross(right, forward);
 
-    CameraPushConstants pc{};
-    pc.invViewProj = glm::inverse(proj * view);
-    pc.rayOrigin   = eye;
-    return pc;
+    float fov = glm::radians(60.0f);
+    float tanHalfFov = std::tan(fov * 0.5f);
+
+    // Camera space ray through NDC.
+    glm::mat4 invProj(
+        tanHalfFov * aspectRatio, 0, 0, 0,
+        0, -tanHalfFov, 0, 0,
+        0, 0, 0, 1,
+        0, 0, -1, 0
+    );
+
+    glm::mat4 invView(
+        right.x,   right.y,   right.z,   0,
+        up.x,      up.y,      up.z,      0,
+        -forward.x, -forward.y, -forward.z, 0,
+        eye.x,     eye.y,     eye.z,     1
+    );
+
+    CameraUBO ubo{};
+    ubo.invViewProj = invView * invProj;
+    ubo.rayOrigin   = eye;
+    return ubo;
 }
 
 bool check_validation_layer_support() {
@@ -324,11 +341,12 @@ void VulkanContext::render_loop() {
         VkCommandBuffer graphicsCmd = frameResources->acquire_graphics_cmd_buffer();
         vkBeginCommandBuffer(graphicsCmd, &cbi);
 
-        uint32_t currentField = computePipeline->current_field_index();
-        CameraPushConstants cam = build_camera_push_constants(camera, static_cast<float>(swapChain.extent.width) / swapChain.extent.height);
+        CameraUBO cam = build_camera_ubo(camera, static_cast<float>(swapChain.extent.width) / swapChain.extent.height);
+        graphicsPipeline->update_camera(frameIndex, cam);
 
-        graphicsPipeline->record_skybox(graphicsCmd, swapChain.framebuffers[imageIndex], swapChain.extent);
-        graphicsPipeline->record_volume(graphicsCmd, *fluidGrid, cam, currentField);
+        uint32_t currentField = computePipeline->current_field_index();
+        graphicsPipeline->record_skybox(graphicsCmd, swapChain.framebuffers[imageIndex], swapChain.extent, frameIndex);
+        graphicsPipeline->record_volume(graphicsCmd, *fluidGrid, currentField, frameIndex);
 
         vkEndCommandBuffer(graphicsCmd);
         frameResources->submit_graphics(renderWindow.graphicsQueue, graphicsCmd);
@@ -521,9 +539,9 @@ void VulkanContext::init_vulkan() {
     computePipeline->allocate_grid(renderWindow.device, renderWindow.physicalDevice, renderWindow.graphicsQueue, computeFamily, *fluidGrid, Constants::GRID_RESOLUTION);
     computePipeline->update_descriptor_sets(renderWindow.device, *fluidGrid);
 
-    graphicsPipeline->init(renderWindow.device, swapChain.imageFormat, swapChain.extent);
+    graphicsPipeline->init(renderWindow.device, renderWindow.physicalDevice, swapChain.imageFormat, swapChain.extent, Constants::MAX_FRAMES_IN_FLIGHT);
     create_framebuffers(renderWindow.device, swapChain, graphicsPipeline->render_pass());
-    graphicsPipeline->init_cubemap(renderWindow.device, renderWindow.physicalDevice, renderWindow.graphicsQueue, indices.graphicsFamily.value(), "assets\\skybox\\Cubemap_Snowy_01-512x512.png");
+    graphicsPipeline->init_cubemap(renderWindow.device, renderWindow.physicalDevice, renderWindow.graphicsQueue, indices.graphicsFamily.value(), "assets\\skybox\\Cubemap_Ocean_01-512x512.png");
     graphicsPipeline->update_descriptor_sets(renderWindow.device, *fluidGrid);
     frameResources->init(renderWindow.device, indices.graphicsFamily.value(), computeFamily);
 

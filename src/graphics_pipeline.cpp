@@ -77,7 +77,7 @@ VkShaderModule create_shader_module(VkDevice device, const std::string& relative
 
 } // namespace
 
-void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkExtent2D extent) {
+void GraphicsPipeline::init(VkDevice device, VkPhysicalDevice physicalDevice, VkFormat swapChainImageFormat, VkExtent2D extent, uint32_t framesInFlight) {
     // Render pass: single color attachment, no depth (draw order handles skybox, then volume) 
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format         = swapChainImageFormat;
@@ -126,6 +126,20 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
     if (vkCreateDescriptorSetLayout(device, &dslInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create graphics descriptor set layout");
 
+    // Binding 1: camera UBO descriptor set layout
+    VkDescriptorSetLayoutBinding cameraBinding{};
+    cameraBinding.binding         = 0;
+    cameraBinding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    cameraBinding.descriptorCount = 1;
+    cameraBinding.stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo camDslInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    camDslInfo.bindingCount = 1;
+    camDslInfo.pBindings    = &cameraBinding;
+    if (vkCreateDescriptorSetLayout(device, &camDslInfo, nullptr, &cameraSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("failed to create camera descriptor set layout");
+
+
     // Trilinear sampler for the volume; clamps to border so rays exiting the box read as empty
     VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     samplerInfo.magFilter    = VK_FILTER_LINEAR;
@@ -137,11 +151,14 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
         throw std::runtime_error("failed to create volume sampler");
 
     // Descriptor pool & sets: 2 sets, one per ComputePipeline field parity 
-    VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 2 };
+    std::array<VkDescriptorPoolSize, 2> poolSizes{{
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 2 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, framesInFlight }
+    }};
     VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes    = &poolSize;
-    poolInfo.maxSets       = 2;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes    = poolSizes.data();
+    poolInfo.maxSets       = 2 + framesInFlight;
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
         throw std::runtime_error("failed to create graphics descriptor pool");
 
@@ -153,16 +170,61 @@ void GraphicsPipeline::init(VkDevice device, VkFormat swapChainImageFormat, VkEx
     descriptorSets.resize(2);
     if (vkAllocateDescriptorSets(device, &dsAlloc, descriptorSets.data()) != VK_SUCCESS)
         throw std::runtime_error("failed to allocate graphics descriptor sets");
-    // TODO: vkUpdateDescriptorSets x2 (one per field parity) — needs grid.densityView[i]/ temperatureView[i] and the cubemap's view/sampler (need grid allocation and cubemap)
 
+    // Camera UBO, one per frame-in-flight
+    cameraBuffers.resize(framesInFlight);
+    cameraBuffersMemory.resize(framesInFlight);
+    cameraBuffersMapped.resize(framesInFlight);
+
+    VkDeviceSize bufferSize = sizeof(CameraUBO);
+    for (uint32_t i = 0; i < framesInFlight; ++i) {
+        VkBufferCreateInfo bufInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bufInfo.size        = bufferSize;
+        bufInfo.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device, &bufInfo, nullptr, &cameraBuffers[i]) != VK_SUCCESS)
+            throw std::runtime_error("failed to create camera UBO buffer");
+
+        VkMemoryRequirements memReq;
+        vkGetBufferMemoryRequirements(device, cameraBuffers[i], &memReq);
+        VkMemoryAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        allocInfo.allocationSize  = memReq.size;
+        allocInfo.memoryTypeIndex = find_memory_type(physicalDevice, memReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &cameraBuffersMemory[i]) != VK_SUCCESS)
+            throw std::runtime_error("failed to allocate camera UBO memory");
+        vkBindBufferMemory(device, cameraBuffers[i], cameraBuffersMemory[i], 0);
+
+        vkMapMemory(device, cameraBuffersMemory[i], 0, bufferSize, 0, &cameraBuffersMapped[i]);
+    }
+
+    // Camera descriptor sets: one per frame-in-flight
+    std::vector<VkDescriptorSetLayout> cameraSetLayouts(framesInFlight, cameraSetLayout);
+    VkDescriptorSetAllocateInfo camDsAlloc{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    camDsAlloc.descriptorPool     = descriptorPool;
+    camDsAlloc.descriptorSetCount = framesInFlight;
+    camDsAlloc.pSetLayouts        = cameraSetLayouts.data();
+    cameraDescriptorSets.resize(framesInFlight);
+    if (vkAllocateDescriptorSets(device, &camDsAlloc, cameraDescriptorSets.data()) != VK_SUCCESS)
+        throw std::runtime_error("failed to allocate camera descriptor sets");
+
+    for (uint32_t i = 0; i < framesInFlight; ++i) {
+        VkDescriptorBufferInfo bufInfo{ cameraBuffers[i], 0, sizeof(CameraUBO) };
+        VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        write.dstSet         = cameraDescriptorSets[i];
+        write.dstBinding      = 0;
+        write.descriptorCount = 1;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo     = &bufInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+    
     // Pipeline layouts 
-    VkPushConstantRange pushRange{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(CameraPushConstants) };
+    VkDescriptorSetLayout pipelineSetLayouts[] = { descriptorSetLayout, cameraSetLayout };
 
     VkPipelineLayoutCreateInfo plInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-    plInfo.setLayoutCount         = 1;
-    plInfo.pSetLayouts            = &descriptorSetLayout;
-    plInfo.pushConstantRangeCount = 1;
-    plInfo.pPushConstantRanges    = &pushRange;
+    plInfo.setLayoutCount = 2;
+    plInfo.pSetLayouts    = pipelineSetLayouts;
     if (vkCreatePipelineLayout(device, &plInfo, nullptr, &skyboxLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create skybox pipeline layout");
     if (vkCreatePipelineLayout(device, &plInfo, nullptr, &volumeLayout) != VK_SUCCESS)
@@ -272,6 +334,12 @@ void GraphicsPipeline::cleanup(VkDevice device) {
     vkDestroySampler(device, volumeSampler, nullptr);
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+    for (size_t i = 0; i < cameraBuffers.size(); ++i) {
+        vkUnmapMemory(device, cameraBuffersMemory[i]);
+        vkDestroyBuffer(device, cameraBuffers[i], nullptr);
+        vkFreeMemory(device, cameraBuffersMemory[i], nullptr);
+    }
+    vkDestroyDescriptorSetLayout(device, cameraSetLayout, nullptr);
 
     if (cubemap.cubemapImageView != VK_NULL_HANDLE) vkDestroyImageView(device, cubemap.cubemapImageView, nullptr);
     if (cubemap.cubemapSampler   != VK_NULL_HANDLE) vkDestroySampler(device, cubemap.cubemapSampler, nullptr);
@@ -279,7 +347,7 @@ void GraphicsPipeline::cleanup(VkDevice device) {
     if (cubemap.cubemapMemory    != VK_NULL_HANDLE) vkFreeMemory(device, cubemap.cubemapMemory, nullptr);
 }
 
-void GraphicsPipeline::record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuffer, VkExtent2D extent) {
+void GraphicsPipeline::record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuffer, VkExtent2D extent, uint32_t frameIndex) {
     VkClearValue clearColor{ {{0.0f, 0.0f, 0.0f, 1.0f}} };
 
     VkRenderPassBeginInfo rpInfo{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
@@ -293,23 +361,26 @@ void GraphicsPipeline::record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuf
 
     if (cubemap.skyboxEnabled) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
-        // Descriptor binding 0 (cubemap sampler) becomes meaningful once init()'s vkUpdateDescriptorSets TODO is filled in.
-        vkCmdDraw(cmd, 3, 1, 0, 0);   // fullscreen triangle; view direction reconstructed in the vertex shader
+        // descriptorSets[0]: cubemap binding is identical in both field-parity variants so the skybox draw doesn't need to know about fluid-sim parity at all.
+        VkDescriptorSet sets[] = { descriptorSets[0], cameraDescriptorSets[frameIndex] };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxLayout, 0, 2, sets, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
     }
-
     /* Render pass deliberately left open: record_volume must be called immediately after this, in the same command buffer, to close it. 
     The two are one draw call pair, not independently callable. */
 }
 
-void GraphicsPipeline::record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera, uint32_t currentFieldIndex)
-{
+void GraphicsPipeline::record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, uint32_t currentFieldIndex, uint32_t frameIndex) {
     (void)grid;   // binding is resolved through the pre-built descriptor set, not read directly here
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, volumePipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, volumeLayout, 0, 1,  &descriptorSets[currentFieldIndex], 0, nullptr);
-    vkCmdPushConstants(cmd, volumeLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(camera), &camera);
-    vkCmdDraw(cmd, 3, 1, 0, 0);   // fullscreen triangle; ray/box intersection done per-pixel in the fragment shader
+    VkDescriptorSet sets[] = { descriptorSets[currentFieldIndex], cameraDescriptorSets[frameIndex] };
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, volumeLayout, 0, 2, sets, 0, nullptr);
+    vkCmdDraw(cmd, 3, 1, 0, 0);     // fullscreen triangle; ray/box intersection done per-pixel in the fragment shader
+    vkCmdEndRenderPass(cmd);        // closes the pass record_skybox opened
+}
 
-    vkCmdEndRenderPass(cmd);   // closes the pass record_skybox opened
+void GraphicsPipeline::update_camera(uint32_t frameIndex, const CameraUBO& camera) {
+    std::memcpy(cameraBuffersMapped[frameIndex], &camera, sizeof(CameraUBO));
 }
 
 void GraphicsPipeline::init_cubemap(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, const std::string& crossImagePath)

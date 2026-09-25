@@ -192,6 +192,7 @@ void ComputePipeline::init(VkDevice device, uint32_t computeQueueFamily, uint32_
     // TODO: vkUpdateDescriptorSets x4 — needs FluidGridResources' actual VkImageView handles, which don't exist until grid allocation is implemented.
 
     // Pipelines, one per pass, all sharing "layout"
+    injectPipeline          = create_compute_pipeline(device, "shaders/inject.comp.spv", layout);
     buoyancyPipeline        = create_compute_pipeline(device, "shaders/buoyancy.comp.spv", layout);
     advectVelocityPipeline  = create_compute_pipeline(device, "shaders/advect_velocity.comp.spv", layout);
     divergencePipeline      = create_compute_pipeline(device, "shaders/divergence.comp.spv", layout);
@@ -228,6 +229,7 @@ void ComputePipeline::cleanup(VkDevice device) {
     vkDestroyPipeline(device, projectionPipeline, nullptr);
     vkDestroyPipeline(device, advectScalarsPipeline, nullptr);
     vkDestroyPipeline(device, boundaryPipeline, nullptr);
+    vkDestroyPipeline(device, injectPipeline, nullptr);
 
     vkDestroyPipelineLayout(device, layout, nullptr);
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);            // also frees its descriptor sets
@@ -244,6 +246,11 @@ void ComputePipeline::record(VkCommandBuffer cmd, const FluidGridResources& grid
     auto end_region = [&](TimingRegion region) {
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, region * 2 + 1);
     };
+
+    begin_region(kTimingInject);
+    record_inject(cmd, grid, dt);
+    end_region(kTimingInject);
+    barrier(cmd);
 
     begin_region(kTimingBuoyancy);
     record_buoyancy(cmd, grid, dt);
@@ -310,7 +317,7 @@ void ComputePipeline::read_timestamp_results(VkDevice device, uint32_t frameInde
 
 void ComputePipeline::log_timings() const {
     static const char* kRegionNames[kTimingRegionCount] = {
-        "buoyancy", "advect_velocity", "boundary(pre)", "divergence",
+        "inject", "buoyancy", "advect_velocity", "boundary(pre)", "divergence",
         "jacobi", "projection", "boundary(post)", "advect_scalars"
     };
     float total = 0.0f;
@@ -320,6 +327,10 @@ void ComputePipeline::log_timings() const {
         total += lastTimings[i];
     }
     std::cout << "  total: " << total << "\n";
+}
+
+void ComputePipeline::record_inject(VkCommandBuffer cmd, const FluidGridResources& grid, float dt) {
+    dispatch_pass(cmd, injectPipeline, layout, descriptorSets[fieldPingPong * 2 + pressurePingPong], grid.gridResolution, dt);
 }
 
 void ComputePipeline::record_buoyancy(VkCommandBuffer cmd, const FluidGridResources& grid, float dt) {

@@ -11,10 +11,10 @@
 
 struct FluidGridResources;
 
-struct CameraPushConstants {
+struct CameraUBO {
     glm::mat4   invViewProj;
     glm::vec3   rayOrigin;
-    float       _pad;   // alignment
+    float       _pad;
 };
 
 // Everything is prettier with a skybox
@@ -28,10 +28,11 @@ struct Cubemap {
 
 class GraphicsPipeline {
 public:
-    void init(VkDevice device, VkFormat swapChainImageFormat, VkExtent2D extent);
+    void init(VkDevice device, VkPhysicalDevice physicalDevice, VkFormat swapChainImageFormat, VkExtent2D extent, uint32_t framesInFlight);
     void cleanup(VkDevice device);
-    void record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuffer, VkExtent2D extent);
-    void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, const CameraPushConstants& camera, uint32_t currentFieldIndex);    
+    void record_skybox(VkCommandBuffer cmd, VkFramebuffer framebuffer, VkExtent2D extent, uint32_t frameIndex);
+    void record_volume(VkCommandBuffer cmd, const FluidGridResources& grid, uint32_t currentFieldIndex, uint32_t frameIndex);
+    void update_camera(uint32_t frameIndex, const CameraUBO& camera);
     // Single image setup, rather than individual faces. -90deg rotated cross shape
     void init_cubemap(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, uint32_t queueFamily, const std::string& crossImagePath);  
     void update_descriptor_sets(VkDevice device, const FluidGridResources& grid);
@@ -40,15 +41,24 @@ public:
 
 private:
     VkRenderPass                    renderPass;
+
     VkPipeline                      skyboxPipeline;
     VkPipelineLayout                skyboxLayout;
+
     VkPipeline                      volumePipeline;
     VkPipelineLayout                volumeLayout;
     VkDescriptorSetLayout           descriptorSetLayout;
     VkDescriptorPool                descriptorPool;
     std::vector<VkDescriptorSet>    descriptorSets;
     VkSampler                       volumeSampler;
-    Cubemap cubemap;
+
+    VkDescriptorSetLayout           cameraSetLayout;
+    std::vector<VkBuffer>           cameraBuffers;
+    std::vector<VkDeviceMemory>     cameraBuffersMemory;
+    std::vector<void*>              cameraBuffersMapped;
+    std::vector<VkDescriptorSet>    cameraDescriptorSets;
+
+    Cubemap                         cubemap;
 };
 
 #endif // GRAPHICS_PIPELINE_H
